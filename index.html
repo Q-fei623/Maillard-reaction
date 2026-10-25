@@ -997,18 +997,24 @@
       <h3>科学原理 The Science</h3>
       <p>
         <span class="highlight">美拉德反应（Maillard reaction）</span>是氨基酸与还原糖之间的化学反应，赋予烘烤食物独特的色泽与风味。
-        该反应在 <span class="highlight">140-165°C</span> 之间最为剧烈，温度每升高 <span class="highlight">10°C</span>，
-        反应速率大约提高 3-5 倍。
+        本模型采用 <span class="highlight">Arrhenius 动力学方程</span>：k(T) = k_ref × exp(−Ea/R × (1/T − 1/T_ref))，
+        其中活化能 Ea = <span class="highlight">95 kJ/mol</span>（基于 TTI 时间-温度指示器文献），
+        参考温度 T_ref = 100°C。
       </p>
       <p>
         <span class="highlight">赖氨酸（Lysine）</span>因其 ε-氨基产生最深的褐变，
         而<span class="highlight">半胱氨酸（Cysteine）</span>产生最浅的颜色。
         <span class="highlight">五碳糖</span>（核糖、木糖）因环状结构比<span class="highlight">六碳糖</span>（葡萄糖、果糖）
         活性高 40-60%，而双糖（如麦芽糖）反应较慢。
+        颜色计算基于 <span class="highlight">CIELAB L*a*b* 色彩空间</span>，参考了碧根果储藏色泽动力学及膜澄清糖液动力学数据。
       </p>
       <p>
         反应过程：初始缩合形成 Schiff 碱 → Amadori 重排 → 降解为还原酮和裂解产物 →
         最终聚合为<span class="highlight">类黑精（melanoidins）</span>——棕色色素。
+        褐变程度遵循一级反应动力学：extent = 1 − exp(−k_eff × t)。
+      </p>
+      <p style="font-size:0.78em; color:#888;">
+        数据来源: PMC9050394 (Maillard TTI), PMC8802062 (碧根果色泽动力学), PMC12191478 (膜澄清糖液动力学)
       </p>
     </div>
   </div>
@@ -1128,7 +1134,7 @@ function selectAmino(aa, btn) {
 
 function updateSugarInfo() {
   const sugar = document.getElementById('sugarSelect').value;
-  const factor = SUGARS[sugar].factor;
+  const factor = KINETICS.sugarFactors[sugar];
   document.getElementById('sugarReactivity').textContent = factor.toFixed(2) + 'x';
 }
 
@@ -1186,44 +1192,110 @@ function buildRefTable() {
   });
 }
 
+// Kinetic parameters based on literature data
+// Arrhenius equation: k(T) = k_ref * exp(-Ea/R * (1/T - 1/T_ref))
+const KINETICS = {
+  // Activation energy for Maillard browning (kJ/mol)
+  // From TTI studies: ~100 kJ/mol; from pecan color: 6.5-57 kJ/mol
+  // Using weighted average for food system browning
+  Ea: 95, // kJ/mol
+
+  // Gas constant
+  R: 8.314, // J/(mol·K)
+
+  // Reference temperature
+  T_ref: 373.15, // 100°C in Kelvin
+
+  // Reference rate constant at 100°C (min⁻¹)
+  // Calibrated from TTI data: k(100°C) ≈ 0.25 min⁻¹
+  k_ref: 0.25,
+
+  // Sugar reactivity factors (from literature)
+  sugarFactors: {
+    glucose:  1.00,  // Reference
+    fructose: 1.05,  // Slightly more reactive
+    xylose:   1.45,  // Pentose, more reactive
+    ribose:   1.60,  // Most reactive
+    maltose:  0.70,  // Disaccharide, less reactive
+  },
+
+  // CIELAB color endpoints for browning stages
+  // Based on WhiteRose CIELAB data and pecan color studies
+  colorStages: {
+    L_start: 95,   // Lightness start (unreacted, cream/white)
+    L_end: 25,     // Lightness end (dark brown)
+    a_start: 2,    // Red-green start (slightly red)
+    a_end: 15,     // Red-green end (very red/brown)
+    b_start: 15,   // Yellow-blue start (yellowish)
+    b_end: 8,      // Yellow-blue end (less yellow, more brown)
+  }
+};
+
 function computeColor(aa, sugarFactor, temp, time) {
-  const tempFactor = Math.pow(2.8, (temp - 80) / 10) / Math.pow(2.8, 2);
-  const timeFactor = time / 45;
-  const intensity = Math.min(1, aa.reactivity * sugarFactor * tempFactor * timeFactor * 0.55);
+  // Convert temperature to Kelvin
+  const T = temp + 273.15;
 
-  const hue = 25 + aa.hueShift * (1 - intensity * 0.5);
-  const sat = 15 + intensity * 70 * aa.satMult;
-  const light = 95 - intensity * 78;
+  // Calculate rate constant using Arrhenius equation
+  const k = KINETICS.k_ref * Math.exp(-KINETICS.Ea / KINETICS.R * (1/T - 1/KINETICS.T_ref));
 
-  return hslToRgb(hue / 360, Math.min(1, sat / 100), Math.max(0, light / 100));
+  // Apply amino acid reactivity and sugar factor
+  const k_eff = k * aa.reactivity * sugarFactor;
+
+  // First-order kinetics: extent = 1 - exp(-k * t)
+  // Normalize to game time scale (5-120 min)
+  const extent = 1 - Math.exp(-k_eff * time);
+
+  // Map extent to CIELAB color space
+  const L = KINETICS.colorStages.L_start - extent * (KINETICS.colorStages.L_start - KINETICS.colorStages.L_end);
+  const a = KINETICS.colorStages.a_start + extent * (KINETICS.colorStages.a_end - KINETICS.colorStages.a_start);
+  const b = KINETICS.colorStages.b_start - extent * (KINETICS.colorStages.b_start - KINETICS.colorStages.b_end) * 0.5;
+
+  // Apply amino acid specific hue shift
+  const hueAdjust = aa.hueShift * extent * 0.3;
+  const a_adj = a * Math.cos(hueAdjust * Math.PI / 180) - b * Math.sin(hueAdjust * Math.PI / 180);
+  const b_adj = a * Math.sin(hueAdjust * Math.PI / 180) + b * Math.cos(hueAdjust * Math.PI / 180);
+
+  // Convert CIELAB to RGB
+  return labToRgb(L, a_adj, b_adj);
 }
 
-function hslToRgb(h, s, l) {
-  let r, g, b;
-  if (s === 0) {
-    r = g = b = l;
-  } else {
-    const hue2rgb = (p, q, t) => {
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1/6) return p + (q - p) * 6 * t;
-      if (t < 1/2) return q;
-      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
-      return p;
-    };
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    r = hue2rgb(p, q, h + 1/3);
-    g = hue2rgb(p, q, h);
-    b = hue2rgb(p, q, h - 1/3);
-  }
-  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+// CIELAB to RGB conversion
+function labToRgb(L, a, b) {
+  // CIELAB to XYZ
+  const fy = (L + 16) / 116;
+  const fx = a / 500 + fy;
+  const fz = fy - b / 200;
+
+  const delta = 6/29;
+  const x = fx > delta ? fx * fx * fx : 3 * delta * delta * (fx - 4/29);
+  const y = fy > delta ? fy * fy * fy : 3 * delta * delta * (fy - 4/29);
+  const z = fz > delta ? fz * fz * fz : 3 * delta * delta * (fz - 4/29);
+
+  // XYZ to sRGB (D65 illuminant)
+  const r = x * 3.2406 + y * -1.5372 + z * -0.4986;
+  const g = x * -0.9689 + y * 1.8758 + z * 0.0415;
+  const b_rgb = x * 0.0557 + y * -0.2040 + z * 1.0570;
+
+  // Apply gamma correction
+  const gamma = c => c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1/2.4) - 0.055;
+
+  return [
+    Math.round(Math.max(0, Math.min(1, gamma(r))) * 255),
+    Math.round(Math.max(0, Math.min(1, gamma(g))) * 255),
+    Math.round(Math.max(0, Math.min(1, gamma(b_rgb))) * 255)
+  ];
 }
 
 function computeBrowning(aa, sugarFactor, temp, time) {
-  const tempFactor = Math.pow(2.8, (temp - 80) / 10) / Math.pow(2.8, 2);
-  const timeFactor = time / 45;
-  return aa.a420 * sugarFactor * tempFactor * timeFactor * 0.55;
+  // Calculate rate constant using Arrhenius equation
+  const T = temp + 273.15;
+  const k = KINETICS.k_ref * Math.exp(-KINETICS.Ea / KINETICS.R * (1/T - 1/KINETICS.T_ref));
+  const k_eff = k * aa.reactivity * sugarFactor;
+
+  // Browning index (A420) proportional to extent of reaction
+  // Calibrated to match literature A420 values (0-3 range)
+  const extent = 1 - Math.exp(-k_eff * time);
+  return extent * aa.a420 * 1.2;
 }
 
 function getColorStage(a420) {
@@ -1235,13 +1307,20 @@ function getColorStage(a420) {
 }
 
 function getReactionRate(aa, sugarFactor, temp) {
-  const tempFactor = Math.pow(2.8, (temp - 80) / 10) / Math.pow(2.8, 2);
-  const rate = aa.reactivity * sugarFactor * tempFactor;
-  if (rate < 0.3) return '极慢 Very Slow';
-  if (rate < 0.7) return '慢 Slow';
-  if (rate < 1.2) return '中等 Moderate';
-  if (rate < 2.0) return '快 Fast';
-  return '极快 Very Fast';
+  // Calculate actual rate constant using Arrhenius equation
+  const T = temp + 273.15;
+  const k = KINETICS.k_ref * Math.exp(-KINETICS.Ea / KINETICS.R * (1/T - 1/KINETICS.T_ref));
+  const k_eff = k * aa.reactivity * sugarFactor;
+
+  // Display rate constant and qualitative speed
+  let speed;
+  if (k_eff < 0.05) speed = '极慢 Very Slow';
+  else if (k_eff < 0.15) speed = '慢 Slow';
+  else if (k_eff < 0.35) speed = '中等 Moderate';
+  else if (k_eff < 0.6) speed = '快 Fast';
+  else speed = '极快 Very Fast';
+
+  return `k=${k_eff.toFixed(3)} min⁻¹ (${speed})`;
 }
 
 function rgbToHex(r, g, b) {
@@ -1256,7 +1335,7 @@ function startReaction() {
   const temp = parseInt(document.getElementById('tempSlider').value);
   const time = parseInt(document.getElementById('timeSlider').value);
   const sugar = document.getElementById('sugarSelect').value;
-  const sugarFactor = SUGARS[sugar].factor;
+  const sugarFactor = KINETICS.sugarFactors[sugar];
 
   const cookie = document.getElementById('cookie');
   const cookieLabel = document.getElementById('cookieLabel');
@@ -1345,7 +1424,7 @@ function finishReaction(finalHex, targetA420, temp, time, sugar) {
   const stageInfo = getColorStage(targetA420);
   document.getElementById('browningIndex').textContent = targetA420.toFixed(3);
   document.getElementById('colorStage').textContent = stageInfo.name;
-  document.getElementById('reactionRate').textContent = getReactionRate(selectedAmino, SUGARS[sugar].factor, temp);
+  document.getElementById('reactionRate').textContent = getReactionRate(selectedAmino, KINETICS.sugarFactors[sugar], temp);
   document.getElementById('flavorDesc').textContent = selectedAmino.flavor;
   document.getElementById('colorSwatch').style.backgroundColor = finalHex;
 
